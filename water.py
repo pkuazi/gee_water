@@ -70,7 +70,7 @@ NEW = image.expression('(BLUE - SWIR7)/(BLUE + SWIR7)',{'BLUE':image.select('B1'
 NDWI_B = image.expression('(BLUE - NIR)/(BLUE+NIR)',{'BLUE':image.select('B1'), 'NIR':image.select('B4')})
 AWElnsh = image.expression('4*(GREEN-SWIR5)-(0.25*NIR+2.75*SWIR7)',{'GREEN':image.select('B2'),'SWIR5':image.select('B5'),'NIR':image.select('B4'),'SWIR7':image.select('B7')})
 # To get a collection of random points in a specified region, you can use: Create 1000 random points in the region.
-randomPoints = ee.FeatureCollection.randomPoints(FCfromList);
+# randomPoints = ee.FeatureCollection.randomPoints(FCfromList);
 
 # 第四步， 标注矢量数据转化为训练样本数据
 # Collection query aborted after accumulating over 5000 elements样本点不能超过5000.能否直接读入已经处理好的training数据?
@@ -103,6 +103,18 @@ for i in range(whole_count):
     trainpixel = ee.Feature(None, dict(whole_dt.iloc[i]))
     trainFeat.append(trainpixel)
 trainFC = ee.FeatureCollection(trainFeat)
+
+# 第五步 训练模型，并将指数特征波段加入到image中
+# feature attributes list
+train_bands = list(whole_dt.columns.values)
+trained = ee.Classifier.cart().train(trainFC, 'landcover', train_bands)
+
+# classify the image with the same bands used for training
+newimage = image.addBands(NDWI, MNDWI, EWI, NEW, NDWI_B, AWElnsh)
+classified = newimage.select(train_bands).classify(trained)
+
+# 最后一步，结果导出
+# 研究 https://developers.google.com/earth-engine/exporting
 
 '''geometry:
 null
