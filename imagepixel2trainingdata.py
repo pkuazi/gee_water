@@ -189,6 +189,7 @@ class Imagepixel_Trainingdata:
 
         training_X = self.gen_features(original_X)
         training_Y = pd.DataFrame(training_Y)
+        training_Y.columns = ['landcover']
         return training_X, training_Y
 
     def split_dataset(self, x_df, y_df, frac):
@@ -258,6 +259,19 @@ def test_generate_training_data():
     file_root = '/mnt/win/water_paper/training_data/TM'
     generate_training_data(file_root, 'TM')
 
+def test():
+    file_root = '/mnt/win/water_paper/training_data/TM'
+    file_root = file_root
+    image_bands_dir = os.path.join(file_root, 'image/L5134036')
+    sensor = 'TM'
+
+    imagepixel_trainingdata = Imagepixel_Trainingdata(file_root, image_bands_dir, sensor)
+    training_X, training_y = imagepixel_trainingdata.get_training_data()
+
+    # train_x, train_y, test_x, test_y = imagepixel_trainingdata.split_dataset(training_X, training_y, 0.1)
+
+
 
 if __name__ == '__main__':
-    test_generate_training_data()
+    # test_generate_training_data()
+    test()
