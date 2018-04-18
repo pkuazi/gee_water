@@ -7,8 +7,11 @@
 
 """
 qtp water extraction
+
 """
 import fiona
+import ee
+ee.Initialize()
 
 # 第一步，读取标注的矢量文件，存储为earthengine的FeatureCollection类型
 shp_file = '/mnt/win/water_paper/training_data/TM/feature_shp/water-L5134036.shp'
@@ -22,10 +25,6 @@ for feature in vector:
     # feature['geoemtry'] is in Json format
     geojson = feature['geometry']
     geojson_list.append(geojson)
-
-import ee
-
-ee.Initialize()
 features = []
 for i in range(len(geojson_list)):
     type = geojson_list[i]['type']
@@ -65,6 +64,9 @@ feat_date = "2005-08-23"
 date = datetime.strptime(feat_date, "%Y-%m-%d")
 modified_date = date + timedelta(days=1)
 end_date = datetime.strftime(modified_date, "%Y-%m-%d")
+# The type of comparison. One of:
+#           "equals", "less_than", "greater_than", "contains", "begins_with",
+#           "ends_with", or any of these prefixed with "not_".
 imageCol = ee.ImageCollection('LANDSAT/LT05/C01/T1_TOA').filterDate(feat_date, end_date).filterMetadata('WRS_PATH','equals',path).filterMetadata('WRS_ROW', 'equals', row).sort('CLOUD_COVER')
 image = ee.Image(imageCol.first())
 
@@ -95,21 +97,14 @@ AWElnsh = image.expression('4*(GREEN-SWIR5)-(0.25*NIR+2.75*SWIR7)',{'GREEN': ima
 # To get a collection of random points in a specified region, you can use: Create 1000 random points in the region.
 # 将特征指数图片合并为一个image, 加入到image中
 feat_image = ee.Image.cat(NDWI, MNDWI, EWI, NEW, NDWI_B, AWElnsh)
+# Use these bands for classification.
 newimage = image.select(['B1', 'B2', 'B3', 'B4', 'B5', 'B7']).addBands(feat_image)
 bandNames = newimage.bandNames().getInfo()
-
-download_url = newimage.getDownloadURL(('water_indices.tif', bandNames, crs, crs_transform))
-# export results into raster file
-# TODO
-cmd = 'Export.image.toAsset({image: %s,  description: %s,  assetId: %s,   crs: %s,  crsTransform:%s})'%(newimage,'imageToAssetExample', 'exampleExport',crs,crs_transform)
-
-
-# randomPoints = ee.FeatureCollection.randomPoints(FCfromList);
 
 # 第四步， 标注矢量数据转化为训练样本数据
 # Collection query aborted after accumulating over 5000 elements样本点不能超过5000.能否直接读入已经处理好的training数据?
 # training = image.sampleRegions(FCfromList)
-# 直接从已有数据中生成training 数据
+# 直接从已有数据中生成training 数据, upload to earth engine as fusion table
 from imagepixel2trainingdata import Imagepixel_Trainingdata
 import os
 import pandas as pd
@@ -128,48 +123,61 @@ whole_count, x_col = training_X.shape
 
 training_y = training_y.rename(columns={0: 'landcover'})
 whole_dt = pd.merge(training_X, training_y, left_index=True, right_index=True)
+whole_dt.to_csv('/tmp/test_train.csv', index=False, header=['B1', 'B2', 'B3', 'B4', 'B5', 'B7','NDWI', 'MNDWI', 'EWI', 'NEW', 'NDWI_B', 'AWElnsh','landcover'])
 
-print(whole_dt.iloc[0])
+# 第五步 读取训练数据到google earth engine的featurecollection中
+# method 1 upload the training csv to Google fusion table, and use earth engine to read it directly
+trainFC = ee.FeatureCollection('ft:1-_ZZN5xYfSrDSKkcHEuRyz4dDsqqa_bFg2J_tD89')
 
-# ['B10', 'B20', 'B30', 'B40', 'B50', 'B70']['NDWI', 'MNDWI', 'EWI', 'NEW', 'NDWI_B', 'AWElnsh']
-trainFeat = []
-for i in range(whole_count):
-    trainpixel = ee.Feature(None, dict(whole_dt.iloc[i]))
-    trainFeat.append(trainpixel)
-trainFC = ee.FeatureCollection(trainFeat)
+# method 2
+# feature attributes list：['B10', 'B20', 'B30', 'B40', 'B50', 'B70']['NDWI', 'MNDWI', 'EWI', 'NEW', 'NDWI_B', 'AWElnsh']
+# print(whole_dt.iloc[0])
+# trainFeat = []
+# for i in range(whole_count):
+#     trainpixel = ee.Feature(None, dict(whole_dt.iloc[i]))
+#     trainFeat.append(trainpixel)
+# trainFC = ee.FeatureCollection(trainFeat)
 
-# 第五步 训练模型，并
-
-# feature attributes list
-train_bands = list(whole_dt.columns.values)
-trained = ee.Classifier.cart().train(trainFC, 'landcover', train_bands)
+# 第六步，训练模型，并处理数据
+# Train a CART classifier.
+# # // The name of the property on the points storing the class label.
+classProperty = 'landcover'
+# class label is stored in the 'landcover' property
+classifier = ee.Classifier.cart().train(trainFC, classProperty, bandNames)
+# Print some info about the classifier (specific to CART).
+print('CART, explained', classifier.explain())
 
 # classify the image with the same bands used for training
-classified = newimage.select(train_bands).classify(trained)
+classified = newimage.select(bandNames).classify(classifier)
+# # Map.centerObject(newfc);
+# # Map.addLayer(classified, {min: 0, max: 2, palette: ['red', 'green', 'blue']});
 
-# 最后一步，结果导出
+# // Optionally, do some accuracy assessment.  Fist, add a column of random uniforms to the training dataset.
+withRandom = trainFC.randomColumn('random')
+#
+# // We want to reserve some of the data for testing, to avoid overfitting the model.
+split = 0.7;  # Roughly 70% training, 30% testing.
+trainingPartition = withRandom.filter(ee.Filter.lt('random', split))
+testingPartition = withRandom.filter(ee.Filter.gte('random', split))
+#
+# // Trained with 70% of our data.
+trainedClassifier = ee.Classifier.gmoMaxEnt().train({trainingPartition,classProperty, bandNames})
+#
+# // Classify the test FeatureCollection.
+test = testingPartition.classify(trainedClassifier)
+
+# // Print the confusion matrix.
+confusionMatrix = test.errorMatrix(classProperty, 'classification')
+print('Confusion Matrix', confusionMatrix)
+
+# 第七步， 结果导出
 # 研究 https://developers.google.com/earth-engine/exporting
-
-'''geometry:
-null
-properties:
-Object (7 properties)
-B2:
-0.30924684
-B3:
-0.30622107
-B4:
-0.3287045
-B5:
-0.35653275
-B6:
-0.33084685
-B7:
-0.21383573
-landcover:
-0'''
+# export results into raster file
+# TODO
+cmd = 'Export.image.toAsset({image: %s,  description: %s,  assetId: %s,   crs: %s,  crsTransform:%s})'%(newimage,'imageToAssetExample', 'exampleExport',crs,crs_transform)
 
 
+# example
 # urban = ee.FeatureCollection(
 #         [ee.Feature(
 #             ee.Geometry.Point([-122.40898132324219, 37.78247386188714]),
